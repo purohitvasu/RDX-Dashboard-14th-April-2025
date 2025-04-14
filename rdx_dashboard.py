@@ -6,10 +6,19 @@ import pandas as pd
 import requests
 from datetime import datetime
 import base64
+import gspread
+from gspread_dataframe import set_with_dataframe
+from google.auth import default
 
 # Telegram Config
 BOT_TOKEN = "8079995624:AAEHYRrmaoY6aYNfXKHxuzKu_rgTRjEI6i8"
 CHAT_ID = "-4751937934"
+
+# Google Sheet Config
+SHEET_URL = "https://docs.google.com/spreadsheets/d/1jTy1r04N-_WKNJmzpXoiY5KJkUzDJL-rRXpQ3O00T6E"
+creds, _ = default()
+gc = gspread.authorize(creds)
+workbook = gc.open_by_url(SHEET_URL)
 
 # Nifty50 symbols
 nifty50 = ["ADANIENT","ADANIPORTS","APOLLOHOSP","ASIANPAINT","AXISBANK","BAJAJ-AUTO","BAJFINANCE",
@@ -42,6 +51,20 @@ if delivery_file and st.button("Analyze Delivery Spikes"):
         df["DELIV_PER"] = pd.to_numeric(df["DELIV_PER"], errors="coerce")
         df = df.dropna(subset=["DELIV_PER"])
         spikes = df[df["DELIV_PER"] > 60][["SYMBOL", "DELIV_PER"]]
+        df_spikes = spikes.copy()
+        df_spikes["Date"] = datetime.today().strftime("%Y-%m-%d")
+
+        try:
+            worksheet = workbook.worksheet("Delivery Sheet")
+            existing = pd.DataFrame(worksheet.get_all_records())
+            updated = pd.concat([existing, df_spikes], ignore_index=True)
+            worksheet.clear()
+        except:
+            worksheet = workbook.add_worksheet(title="Delivery Sheet", rows=1000, cols=10)
+            updated = df_spikes
+
+        set_with_dataframe(worksheet, updated)
+
         if not spikes.empty:
             date = datetime.today().strftime("%d-%b-%Y")
             message = f"📢 Delivery Spikes – {date}\n"
@@ -51,78 +74,8 @@ if delivery_file and st.button("Analyze Delivery Spikes"):
             st.success("Alert sent to Telegram." if sent else "Failed to send alert.")
             st.dataframe(spikes)
         else:
+            no_spike_msg = f"📢 No delivery spikes above 60% for {datetime.today().strftime('%d-%b-%Y')}"
+            send_telegram(no_spike_msg)
             st.info("No spikes above 60% today.")
     else:
         st.error("❌ Uploaded file must contain 'SYMBOL' and 'DELIV_PER' columns.")
-
-# 📈 Section 2: F&O Bhavcopy
-st.subheader("📈 F&O OI Summary – NIFTY + Top 5 Movers")
-fo_file = st.file_uploader("Upload F&O Bhavcopy (.csv)", type="csv", key="fo")
-
-if fo_file and st.button("Analyze F&O Bhavcopy"):
-    df = pd.read_csv(fo_file)
-    df.columns = df.columns.str.strip()
-    df.rename(columns={"TckrSymb": "SYMBOL", "FinInstrmTp": "INSTRUMENT", "XpryDt": "EXPIRY_DT",
-                       "OptnTp": "OPTION_TYP", "StrkPric": "STRIKE_PR", "OpnIntrst": "OPEN_INT",
-                       "ChngInOpnIntrst": "CHG_IN_OI"}, inplace=True)
-    df["SYMBOL"] = df["SYMBOL"].astype(str).str.upper()
-    df["OPTION_TYP"] = df["OPTION_TYP"].fillna("")
-    df["OPEN_INT"] = pd.to_numeric(df["OPEN_INT"], errors="coerce")
-    df["CHG_IN_OI"] = pd.to_numeric(df["CHG_IN_OI"], errors="coerce")
-
-    # NIFTY Summary
-    nifty_df = df[df["SYMBOL"] == "NIFTY"]
-    fut_oi = nifty_df[nifty_df["INSTRUMENT"] == "IDF"]["OPEN_INT"].sum()
-    chg_oi = nifty_df[nifty_df["INSTRUMENT"] == "IDF"]["CHG_IN_OI"].sum()
-    ce_oi = nifty_df[(nifty_df["INSTRUMENT"] == "IDO") & (nifty_df["OPTION_TYP"] == "CE")]["OPEN_INT"].sum()
-    pe_oi = nifty_df[(nifty_df["INSTRUMENT"] == "IDO") & (nifty_df["OPTION_TYP"] == "PE")]["OPEN_INT"].sum()
-    pcr = round(pe_oi / ce_oi, 2) if ce_oi > 0 else 0
-
-    # Top 5 Gainers & Losers from Futures
-    stock_df = df[(df["INSTRUMENT"] == "STF") & (df["SYMBOL"].isin(nifty50))]
-    gainers = stock_df.sort_values("CHG_IN_OI", ascending=False).head(5)
-    losers = stock_df.sort_values("CHG_IN_OI", ascending=True).head(5)
-
-    message = f"📉 NIFTY F&O Summary – {datetime.today().strftime('%d-%b-%Y')}\n"
-    message += f"🔹 Fut OI: {fut_oi/1e6:.2f}M\n🔹 Chg in OI: {chg_oi/1e5:.2f}L\n"
-    message += f"🔹 CE OI: {ce_oi/1e6:.2f}M\n🔹 PE OI: {pe_oi/1e6:.2f}M\n🔹 PCR: {pcr}\n\n"
-    message += "📈 Top 5 OI Gainers:\n"
-    for _, row in gainers.iterrows():
-        message += f"🔹 {row['SYMBOL']}: +{row['CHG_IN_OI']/1e5:.2f}L\n"
-    message += "\n📉 Top 5 OI Losers:\n"
-    for _, row in losers.iterrows():
-        message += f"🔻 {row['SYMBOL']}: {row['CHG_IN_OI']/1e5:.2f}L\n"
-
-    sent = send_telegram(message)
-    st.success("F&O Summary with Gainers/Losers sent to Telegram." if sent else "Failed to send.")
-    st.text(message)
-
-# 👥 Section 3: FII/Pro OI Tracker
-st.subheader("👥 FII / Pro Position Tracker")
-fii_file = st.file_uploader("Upload Participant OI File (.csv)", type="csv", key="fii")
-
-if fii_file and st.button("Analyze FII / Pro"):
-    df = pd.read_csv(fii_file, skiprows=2)
-    cols = ["Client Type", "Index Futures Long", "Index Futures Short", "Stock Futures Long", "Stock Futures Short",
-            "Index Call Option Long", "Index Call Option Short", "Index Put Option Long", "Index Put Option Short",
-            "Stock Call Option Long", "Stock Call Option Short", "Stock Put Option Long", "Stock Put Option Short",
-            "Total Long Contracts", "Total Short Contracts"]
-    df.columns = cols
-    df = df[df["Client Type"].isin(["FII", "Pro"])]
-    df[cols[1:]] = df[cols[1:]].apply(pd.to_numeric, errors='coerce')
-
-    df["Index Net"] = (df["Index Futures Long"] + df["Index Call Option Long"] + df["Index Put Option Short"]) - \
-                      (df["Index Futures Short"] + df["Index Call Option Short"] + df["Index Put Option Long"])
-    df["Stock Net"] = (df["Stock Futures Long"] + df["Stock Call Option Long"] + df["Stock Put Option Short"]) - \
-                      (df["Stock Futures Short"] + df["Stock Call Option Short"] + df["Stock Put Option Long"])
-
-    lines = ["📉 FII & Pro Position – " + datetime.today().strftime("%d-%b-%Y")]
-    for _, row in df.iterrows():
-        i = "Long" if row["Index Net"] > 0 else "Short"
-        s = "Long" if row["Stock Net"] > 0 else "Short"
-        lines.append(f"🔹 {row['Client Type']}: Index = {row['Index Net']/1e3:+.1f}K ({i}), Stock = {row['Stock Net']/1e3:+.1f}K ({s})")
-
-    message = "\n".join(lines)
-    sent = send_telegram(message)
-    st.success("FII/Pro alert sent." if sent else "Failed to send.")
-    st.text(message)
