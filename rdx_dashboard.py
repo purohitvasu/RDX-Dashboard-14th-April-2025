@@ -96,3 +96,33 @@ if fo_file and st.button("Analyze F&O Bhavcopy"):
     sent = send_telegram(message)
     st.success("F&O Summary with Gainers/Losers sent to Telegram." if sent else "Failed to send.")
     st.text(message)
+
+# 👥 Section 3: FII/Pro OI Tracker
+st.subheader("👥 FII / Pro Position Tracker")
+fii_file = st.file_uploader("Upload Participant OI File (.csv)", type="csv", key="fii")
+
+if fii_file and st.button("Analyze FII / Pro"):
+    df = pd.read_csv(fii_file, skiprows=2)
+    cols = ["Client Type", "Index Futures Long", "Index Futures Short", "Stock Futures Long", "Stock Futures Short",
+            "Index Call Option Long", "Index Call Option Short", "Index Put Option Long", "Index Put Option Short",
+            "Stock Call Option Long", "Stock Call Option Short", "Stock Put Option Long", "Stock Put Option Short",
+            "Total Long Contracts", "Total Short Contracts"]
+    df.columns = cols
+    df = df[df["Client Type"].isin(["FII", "Pro"])]
+    df[cols[1:]] = df[cols[1:]].apply(pd.to_numeric, errors='coerce')
+
+    df["Index Net"] = (df["Index Futures Long"] + df["Index Call Option Long"] + df["Index Put Option Short"]) - \
+                      (df["Index Futures Short"] + df["Index Call Option Short"] + df["Index Put Option Long"])
+    df["Stock Net"] = (df["Stock Futures Long"] + df["Stock Call Option Long"] + df["Stock Put Option Short"]) - \
+                      (df["Stock Futures Short"] + df["Stock Call Option Short"] + df["Stock Put Option Long"])
+
+    lines = ["📉 FII & Pro Position – " + datetime.today().strftime("%d-%b-%Y")]
+    for _, row in df.iterrows():
+        i = "Long" if row["Index Net"] > 0 else "Short"
+        s = "Long" if row["Stock Net"] > 0 else "Short"
+        lines.append(f"🔹 {row['Client Type']}: Index = {row['Index Net']/1e3:+.1f}K ({i}), Stock = {row['Stock Net']/1e3:+.1f}K ({s})")
+
+    message = "\n".join(lines)
+    sent = send_telegram(message)
+    st.success("FII/Pro alert sent." if sent else "Failed to send.")
+    st.text(message)
